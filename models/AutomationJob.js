@@ -17,8 +17,8 @@ const automationJobSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'running', 'completed', 'failed', 'stopped'],
-    default: 'pending'
+    enum: ['idle', 'pending', 'running', 'completed', 'failed', 'stopped'],
+    default: 'idle'
   },
   reason: {
     type: String,

@@ -10,7 +10,7 @@ import { delay } from './utils.js';
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration
 // ─────────────────────────────────────────────────────────────────────────────
-const CONCURRENCY = 3; // How many emails to process in parallel
+const CONCURRENCY = 1; // How many emails to process in parallel
 
 const BROWSER_ARGS = [
   '--no-sandbox',
@@ -50,6 +50,23 @@ const safeSaveRecord = async (record) => {
     } else {
       throw err;
     }
+  }
+};
+
+/** Helper to emit live log updates to UI */
+const emitLiveLog = async (record, message, status, io) => {
+  if (message) record.reason = message;
+  if (status) record.status = status;
+  await safeSaveRecord(record);
+  if (io) {
+    io.emit('live-log', {
+      jobId: record.jobId,
+      email: record.email,
+      name: record.name,
+      message: record.reason,
+      status: record.status
+    });
+    io.emit('job-update', { type: 'email-update', jobId: record.jobId });
   }
 };
 
@@ -97,9 +114,9 @@ const processLogin = async (records, emailContext, jobId, runHeadless, io) => {
         url => !url.includes('/account/login'),
         { timeout: 20000 }
       );
-    } catch (_) {}
+    } catch (_) { }
 
-    await flipkartPage.waitForLoadState('domcontentloaded').catch(() => {});
+    await flipkartPage.waitForLoadState('domcontentloaded').catch(() => { });
     await delay(2500);
 
     const verificationFailed = flipkartPage.getByText(/Verification unsuccessful/i);
@@ -110,7 +127,7 @@ const processLogin = async (records, emailContext, jobId, runHeadless, io) => {
     let cookies = [];
     try {
       cookies = await flipkartContext.cookies();
-    } catch (cookieErr) {}
+    } catch (cookieErr) { }
 
     let localStorageData = {};
     try {
@@ -122,7 +139,7 @@ const processLogin = async (records, emailContext, jobId, runHeadless, io) => {
         }
         return d;
       });
-    } catch (lsErr) {}
+    } catch (lsErr) { }
 
     let sessionStorageData = {};
     try {
@@ -134,7 +151,7 @@ const processLogin = async (records, emailContext, jobId, runHeadless, io) => {
         }
         return d;
       });
-    } catch (ssErr) {}
+    } catch (ssErr) { }
 
     ensureScreenshotsDir();
     const screenshotPath = `screenshots/success-${primaryRecord.email}-${Date.now()}.png`;
@@ -169,7 +186,7 @@ const processLogin = async (records, emailContext, jobId, runHeadless, io) => {
           await pages[0].screenshot({ path: screenshotPath, fullPage: false });
         }
       }
-    } catch (_) {}
+    } catch (_) { }
 
     for (const r of records) {
       r.status = 'failed';
@@ -183,8 +200,8 @@ const processLogin = async (records, emailContext, jobId, runHeadless, io) => {
     }
     if (io) io.emit('job-update', { type: 'email-update', jobId });
   } finally {
-    try { if (emailPage) await emailPage.close(); } catch (_) {}
-    try { if (flipkartBrowser) await flipkartBrowser.close(); } catch (_) {}
+    try { if (emailPage) await emailPage.close(); } catch (_) { }
+    try { if (flipkartBrowser) await flipkartBrowser.close(); } catch (_) { }
   }
 };
 
@@ -199,8 +216,7 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
 
   try {
     for (const r of records) {
-      r.reason = 'Automation is running (Purchase)...';
-      await safeSaveRecord(r);
+      await emitLiveLog(r, 'Starting process...', 'inprogress', io);
     }
 
     const loginSession = await LoginEmail.findOne({ email: primaryRecord.email, status: 'success' });
@@ -249,11 +265,7 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
 
     if (isAddressSaved) {
       console.log(`[Automation] Addresses already saved for ${primaryRecord.email}. Navigating directly to cart.`);
-      for (const r of records) {
-        r.reason = 'Addresses already saved. Loading cart...';
-        await safeSaveRecord(r);
-      }
-      if (io) io.emit('job-update', { type: 'email-update', jobId });
+      await emitLiveLog(primaryRecord, 'Addresses already saved. Loading cart...', null, io);
 
       const cartUrl = 'https://www.flipkart.com/viewcart';
       await flipkartPage.goto(cartUrl, { waitUntil: 'domcontentloaded' });
@@ -263,15 +275,11 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
       const screenshotPath = `screenshots/cart-success-${primaryRecord.email}-${Date.now()}.png`;
       await flipkartPage.screenshot({ path: screenshotPath, fullPage: false });
 
-      for (const r of records) {
-        r.status = 'success';
-        r.completedAt = new Date();
-        r.reason = 'Address already saved. Navigated to cart.';
-        r.screenshot = screenshotPath;
-        r.addressSaved = true; 
-        await safeSaveRecord(r);
-      }
-      if (io) io.emit('job-update', { type: 'email-update', jobId });
+      primaryRecord.status = 'success';
+      primaryRecord.completedAt = new Date();
+      primaryRecord.screenshot = screenshotPath;
+      primaryRecord.addressSaved = true;
+      await emitLiveLog(primaryRecord, 'Address already saved. Navigated to cart.', 'success', io);
       console.log(`✅ [Automation] DB saved — ${primaryRecord.email} (Skipped address flow)`);
       return; // Skip the rest of processPurchase
     }
@@ -279,19 +287,22 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
     const targetUrl = 'https://www.flipkart.com/account/addresses';
     console.log(`[Automation] Navigating to target: ${targetUrl} for ${primaryRecord.email}`);
     await flipkartPage.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-    
+
     // Check if user is logged in (heuristic)
     await delay(3000);
+
+    // Fetch all pending records for this email to add all addresses at once
+    const emailRecordsToProcess = await Purchase.find({ 
+      jobId, 
+      email: primaryRecord.email, 
+      status: { $in: ['pending', 'inprogress'] } 
+    }).sort({ _id: 1 });
 
     // Delete all addresses logic
     let deletedCount = 0;
     let maxRetries = 30; // safety limit to prevent infinite loops
-    
-    for (const r of records) {
-      r.reason = 'Deleting existing addresses...';
-      await safeSaveRecord(r);
-    }
-    if (io) io.emit('job-update', { type: 'email-update', jobId });
+
+    await emitLiveLog(primaryRecord, 'Removing existing addresses...', null, io);
 
     while (maxRetries > 0) {
       maxRetries--;
@@ -317,12 +328,12 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
 
         deletedCount++;
         console.log(`[Automation] Deleted address ${deletedCount} for ${record.email}`);
-        
+
         // Wait until the number of dots decreases in the DOM
         await flipkartPage.waitForFunction((expectedCount) => {
           return document.querySelectorAll('.IVvp_M').length < expectedCount;
-        }, dotsCount, { timeout: 4000 }).catch(() => {});
-        
+        }, dotsCount, { timeout: 4000 }).catch(() => { });
+
       } catch (err) {
         console.log(`[Automation] Minor error during deletion (retrying): ${err.message}`);
         await flipkartPage.waitForTimeout(1000); // short delay before retry
@@ -330,15 +341,14 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
     }
 
     // Now add new addresses
-    for (const r of records) {
+    for (const r of emailRecordsToProcess) {
       try {
-        r.reason = 'Adding address...';
-        await safeSaveRecord(r);
+        await emitLiveLog(primaryRecord, `Adding address for ${r.name || r.email}...`, null, io);
 
         const addAddressesEmptyBtn = flipkartPage.locator('button:has-text("ADD ADDRESSES")').first();
         const addNewAddressBtn = flipkartPage.locator('div.cv8zZS:has-text("ADD A NEW ADDRESS")').first();
         const fallbackBtn = flipkartPage.locator('text=/ADD A NEW ADDRESS|ADD ADDRESSES/i').first();
-        
+
         if (await addAddressesEmptyBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
           await addAddressesEmptyBtn.click();
         } else if (await addNewAddressBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
@@ -348,7 +358,7 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
         } else {
           throw new Error('Could not find ADD ADDRESS button');
         }
-        
+
         await flipkartPage.waitForTimeout(1000);
 
         // Fill form fields
@@ -358,7 +368,7 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
           await flipkartPage.locator('input[name="pincode"]').fill(r.pincode);
           await flipkartPage.waitForTimeout(1500); // wait for City/State autofill
         }
-        
+
         // Flipkart Locality is often name="addressLine2" and Address Area is "addressLine1" (textarea)
         if (r.addressline2) await flipkartPage.locator('input[name="addressLine2"]').fill(r.addressline2);
         if (r.addressline1) {
@@ -369,7 +379,7 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
             await flipkartPage.locator('input[name="addressLine1"]').fill(r.addressline1);
           }
         }
-        
+
         if (r.landmark) await flipkartPage.locator('input[name="landmark"]').fill(r.landmark);
         if (r.alternatephone) await flipkartPage.locator('input[name="alternatePhone"]').fill(r.alternatephone);
 
@@ -378,22 +388,22 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
         await saveBtn.click();
 
         await flipkartPage.waitForTimeout(2000); // Wait for save API response
-        
-        r.reason = 'Address saved successfully.';
+
         r.addressSaved = true;
         await safeSaveRecord(r);
-        
+        await emitLiveLog(primaryRecord, `Address saved for ${r.email} - ${r.name}`, null, io);
+
         console.log(`✅ [Automation] Address saved for ${r.email} - ${r.name}`);
-        if (io) io.emit('job-update', { type: 'email-update', jobId });
-        
+
       } catch (err) {
         console.error(`❌ [Automation] Error adding address for ${r.email}: ${err.message}`);
         r.status = 'failed';
         r.completedAt = new Date();
         r.reason = `Failed to add address: ${err.message}`;
         await safeSaveRecord(r);
-        if (io) io.emit('job-update', { type: 'email-update', jobId });
         
+        await emitLiveLog(primaryRecord, `Failed to add address for ${r.name}: ${err.message}`, null, io);
+
         // Recover state by reloading the page to clear the modal
         await flipkartPage.reload({ waitUntil: 'domcontentloaded' });
         await flipkartPage.waitForTimeout(2000);
@@ -401,13 +411,9 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
     }
 
     // After all addresses are processed, navigate to cart
-    for (const r of records) {
-      if (r.status !== 'failed') {
-        r.reason = 'Navigating to cart...';
-        await safeSaveRecord(r);
-      }
+    if (primaryRecord.status !== 'failed') {
+      await emitLiveLog(primaryRecord, 'go to cart page', null, io);
     }
-    if (io) io.emit('job-update', { type: 'email-update', jobId });
 
     const cartUrl = 'https://www.flipkart.com/viewcart';
     await flipkartPage.goto(cartUrl, { waitUntil: 'domcontentloaded' });
@@ -417,16 +423,11 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
     const screenshotPath = `screenshots/cart-success-${primaryRecord.email}-${Date.now()}.png`;
     await flipkartPage.screenshot({ path: screenshotPath, fullPage: false });
 
-    for (const r of records) {
-      if (r.status !== 'failed') {
-        r.status = 'success';
-        r.completedAt = new Date();
-        r.reason = 'Addresses saved. Navigated to cart.';
-        r.screenshot = screenshotPath;
-        await safeSaveRecord(r);
-      }
+    if (primaryRecord.status !== 'failed') {
+      primaryRecord.completedAt = new Date();
+      primaryRecord.screenshot = screenshotPath;
+      await emitLiveLog(primaryRecord, 'Addresses saved. Navigated to cart.', 'success', io);
     }
-    if (io) io.emit('job-update', { type: 'email-update', jobId });
     console.log(`✅ [Automation] DB saved — ${primaryRecord.email} (Completed address flow and cart navigation)`);
 
   } catch (error) {
@@ -438,20 +439,17 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
         screenshotPath = `screenshots/purchase-failed-${primaryRecord.email}-${Date.now()}.png`;
         await flipkartPage.screenshot({ path: screenshotPath, fullPage: false });
       }
-    } catch (_) {}
+    } catch (_) { }
 
     for (const r of records) {
-      if (r.status === 'pending' || r.status === 'running') {
-        r.status = 'failed';
+      if (r.status === 'pending' || r.status === 'inprogress') {
         r.completedAt = new Date();
-        r.reason = error.message;
         if (screenshotPath) r.screenshot = screenshotPath;
-        await safeSaveRecord(r);
+        await emitLiveLog(r, error.message, 'failed', io);
       }
     }
-    if (io) io.emit('job-update', { type: 'email-update', jobId });
   } finally {
-    try { if (flipkartBrowser) await flipkartBrowser.close(); } catch (_) {}
+    try { if (flipkartBrowser) await flipkartBrowser.close(); } catch (_) { }
   }
 };
 
@@ -470,30 +468,6 @@ export const runFlipkartAutomation = async (jobId, userId, runHeadless = true, i
   }
 
   const isPurchase = checkJob.type === 'purchase';
-
-  const query = { jobId, status: 'pending' };
-  if (targetRecordId) query._id = targetRecordId;
-
-  // Fetch all matching pending emails for this job
-  const emails = await Purchase.find(query);
-  console.log(`[Automation] Found ${emails.length} pending email(s) to process. Type: ${checkJob.type}`);
-
-  if (emails.length === 0) {
-    await AutomationJob.updateOne({ _id: jobId, userId }, {
-      status: 'completed',
-      completedAt: new Date(),
-      reason: 'All automation tasks completed successfully.'
-    });
-    if (io) io.emit('job-update', { type: 'status-change', jobId });
-    console.log(`🏁 [Automation] Job "${jobId}" fully completed.`);
-    return;
-  }
-
-  // Set job to 'running'
-  await AutomationJob.updateOne({ _id: jobId, userId }, {
-    status: 'running',
-    reason: `Processing ${emails.length} email(s) with ${CONCURRENCY} parallel workers...`
-  });
 
   let emailContext = null;
   if (!isPurchase) {
@@ -516,38 +490,57 @@ export const runFlipkartAutomation = async (jobId, userId, runHeadless = true, i
     }
   }
 
-  // Group emails by their email address so all orders for one email are processed together
-  const recordsByEmail = {};
-  for (const record of emails) {
-    if (!recordsByEmail[record.email]) recordsByEmail[record.email] = [];
-    recordsByEmail[record.email].push(record);
-  }
-  const emailGroups = Object.values(recordsByEmail);
+  // Reset any stuck inprogress records to pending before starting the loop
+  const resetQuery = { jobId, status: 'inprogress' };
+  if (targetRecordId) resetQuery._id = targetRecordId;
+  await Purchase.updateMany(resetQuery, { status: 'pending', reason: 'Reset from previous run' });
 
-  // ── Process email groups in parallel batches ──────────────────────────────────
-  for (let i = 0; i < emailGroups.length; i += CONCURRENCY) {
-    // Check if user stopped the job
-    const currentJob = await AutomationJob.findById(jobId);
-    if (!currentJob || currentJob.status === 'stopped') {
-      console.log(`🛑 [Automation] Stop signal detected. Halting.`);
+  let hasMoreToProcess = true;
+  while (hasMoreToProcess) {
+    const query = { jobId, status: 'pending' };
+    if (targetRecordId) query._id = targetRecordId;
+
+    const emails = await Purchase.find(query).sort({ _id: 1 });
+
+    if (emails.length === 0) {
       break;
     }
 
-    const batch = emailGroups.slice(i, i + CONCURRENCY);
-    console.log(`[Automation] Processing batch ${Math.floor(i/CONCURRENCY) + 1}...`);
+    console.log(`[Automation] Found ${emails.length} pending email(s) to process. Type: ${checkJob.type}`);
 
-    const promises = batch.map(group => {
-      if (isPurchase) {
-        return processPurchase(group, jobId, runHeadless, io);
-      } else {
-        return processLogin(group, emailContext, jobId, runHeadless, io);
-      }
+    await AutomationJob.updateOne({ _id: jobId, userId }, {
+      status: 'running',
+      reason: `Processing ${emails.length} email(s) with ${CONCURRENCY} parallel workers...`
     });
-    
-    await Promise.all(promises);
-    
-    // Update job progress after each batch
-    if (io) io.emit('job-update', { type: 'batch-complete', jobId });
+
+    // Process each record individually instead of grouping by email
+    const individualRecords = emails.map(r => [r]);
+
+    for (let i = 0; i < individualRecords.length; i += CONCURRENCY) {
+      const currentJob = await AutomationJob.findById(jobId);
+      if (!currentJob || currentJob.status === 'stopped') {
+        console.log(`🛑 [Automation] Stop signal detected. Halting.`);
+        hasMoreToProcess = false;
+        break;
+      }
+
+      const batch = individualRecords.slice(i, i + CONCURRENCY);
+      console.log(`[Automation] Processing batch ${Math.floor(i / CONCURRENCY) + 1}...`);
+
+      const promises = batch.map(group => {
+        if (isPurchase) {
+          return processPurchase(group, jobId, runHeadless, io);
+        } else {
+          return processLogin(group, emailContext, jobId, runHeadless, io);
+        }
+      });
+
+      await Promise.all(promises);
+
+      if (io) io.emit('job-update', { type: 'batch-complete', jobId });
+    }
+
+    if (targetRecordId) break; // Don't loop if we are only targeting a single record
   }
 
   // ── Close shared email context ───────────────────────────────────────────
@@ -555,14 +548,14 @@ export const runFlipkartAutomation = async (jobId, userId, runHeadless = true, i
     try {
       await emailContext.close();
       console.log('[Automation] Shared email context closed.');
-    } catch (_) {}
+    } catch (_) { }
   }
 
   // ── Finalize job status ──────────────────────────────────────────────────
   const finalJob = await AutomationJob.findById(jobId);
   if (finalJob && finalJob.status !== 'stopped') {
     const pendingCount = await Purchase.countDocuments({ jobId, status: 'pending' });
-    const failedCount  = await Purchase.countDocuments({ jobId, status: 'failed' });
+    const failedCount = await Purchase.countDocuments({ jobId, status: 'failed' });
     const successCount = await Purchase.countDocuments({ jobId, status: 'success' });
 
     if (pendingCount === 0) {

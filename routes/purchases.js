@@ -99,12 +99,15 @@ router.post('/upload', requireAuth, upload.single('file'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'No valid records with email addresses could be detected.' });
     }
 
+    // Sort by email so same emails are grouped together sequentially
+    parsedRecords.sort((a, b) => a.email.localeCompare(b.email));
+
     const job = new AutomationJob({
       userId: req.user._id,
       uploadedFile: req.file.originalname,
       type: 'purchase',
-      status: 'pending',
-      reason: 'Queued for automation...'
+      status: 'idle',
+      reason: 'Ready to start...'
     });
     await job.save();
 
@@ -248,7 +251,7 @@ router.get('/file-details', requireAuth, async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
     const skip = (page - 1) * limit;
-    const sortField = req.query.sortField || 'createdAt';
+    const sortField = req.query.sortField || '';
     const sortOrder = req.query.sortOrder === 'desc' ? -1 : 1;
 
     const matchQuery = buildMatchQuery(req, { jobId: job._id });
@@ -264,8 +267,14 @@ router.get('/file-details', requireAuth, async (req, res) => {
       ];
     }
 
+    const sortParams = {};
+    if (sortField) {
+      sortParams[sortField] = sortOrder;
+    }
+    sortParams._id = 1;
+
     const totalRecordsCount = await Purchase.countDocuments(matchQuery);
-    const records = await Purchase.find(matchQuery).sort({ [sortField]: sortOrder }).skip(skip).limit(limit);
+    const records = await Purchase.find(matchQuery).sort(sortParams).skip(skip).limit(limit);
 
     // Global counts
     const allRecords = await Purchase.find({ jobId: job._id }, 'status');

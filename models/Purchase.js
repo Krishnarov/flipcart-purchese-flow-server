@@ -24,7 +24,7 @@ const purchaseSchema = new mongoose.Schema({
   
   status: {
     type: String,
-    enum: ['pending', 'success', 'failed'],
+    enum: ['pending', 'inprogress', 'success', 'failed'],
     default: 'pending'
   },
   screenshot: {
