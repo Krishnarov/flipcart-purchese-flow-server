@@ -215,9 +215,8 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
   const primaryRecord = records[0];
 
   try {
-    for (const r of records) {
-      await emitLiveLog(r, 'Starting process...', 'inprogress', io);
-    }
+    // We only set the first record to inprogress initially to show address processing activity
+    await emitLiveLog(primaryRecord, 'Starting process...', 'inprogress', io);
 
     const loginSession = await LoginEmail.findOne({ email: primaryRecord.email, status: 'success' });
     if (!loginSession) {
@@ -264,25 +263,8 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
     const isAddressSaved = await Purchase.exists({ email: primaryRecord.email, addressSaved: true, status: 'success' });
 
     if (isAddressSaved) {
-      console.log(`[Automation] Addresses already saved for ${primaryRecord.email}. Navigating directly to cart.`);
-      await emitLiveLog(primaryRecord, 'Addresses already saved. Loading cart...', null, io);
-
-      const cartUrl = 'https://www.flipkart.com/viewcart';
-      await flipkartPage.goto(cartUrl, { waitUntil: 'domcontentloaded' });
-      await delay(3000); // Give time for cart to load
-
-      ensureScreenshotsDir();
-      const screenshotPath = `screenshots/cart-success-${primaryRecord.email}-${Date.now()}.png`;
-      await flipkartPage.screenshot({ path: screenshotPath, fullPage: false });
-
-      primaryRecord.status = 'success';
-      primaryRecord.completedAt = new Date();
-      primaryRecord.screenshot = screenshotPath;
-      primaryRecord.addressSaved = true;
-      await emitLiveLog(primaryRecord, 'Address already saved. Navigated to cart.', 'success', io);
-      console.log(`✅ [Automation] DB saved — ${primaryRecord.email} (Skipped address flow)`);
-      return; // Skip the rest of processPurchase
-    }
+      console.log(`[Automation] Addresses already saved for ${primaryRecord.email}. Processing cart for all records sequentially.`);
+    } else {
 
     const targetUrl = 'https://www.flipkart.com/account/addresses';
     console.log(`[Automation] Navigating to target: ${targetUrl} for ${primaryRecord.email}`);
@@ -410,25 +392,29 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
       }
     }
 
-    // After all addresses are processed, navigate to cart
-    if (primaryRecord.status !== 'failed') {
-      await emitLiveLog(primaryRecord, 'go to cart page', null, io);
     }
 
-    const cartUrl = 'https://www.flipkart.com/viewcart';
-    await flipkartPage.goto(cartUrl, { waitUntil: 'domcontentloaded' });
-    await delay(3000); // Give time for cart to load
+    // Sequentially process cart for each record in the group
+    for (const currentRecord of records) {
+      if (currentRecord.status === 'failed') continue;
 
-    ensureScreenshotsDir();
-    const screenshotPath = `screenshots/cart-success-${primaryRecord.email}-${Date.now()}.png`;
-    await flipkartPage.screenshot({ path: screenshotPath, fullPage: false });
+      await emitLiveLog(currentRecord, 'Navigating to cart page...', 'inprogress', io);
 
-    if (primaryRecord.status !== 'failed') {
-      primaryRecord.completedAt = new Date();
-      primaryRecord.screenshot = screenshotPath;
-      await emitLiveLog(primaryRecord, 'Addresses saved. Navigated to cart.', 'success', io);
+      const cartUrl = 'https://www.flipkart.com/viewcart';
+      await flipkartPage.goto(cartUrl, { waitUntil: 'domcontentloaded' });
+      await delay(3000); // Give time for cart to load
+
+      ensureScreenshotsDir();
+      const screenshotPath = `screenshots/cart-success-${currentRecord.email}-${Date.now()}.png`;
+      await flipkartPage.screenshot({ path: screenshotPath, fullPage: false });
+
+      currentRecord.completedAt = new Date();
+      currentRecord.screenshot = screenshotPath;
+      currentRecord.addressSaved = true;
+      await emitLiveLog(currentRecord, 'Addresses saved. Navigated to cart.', 'success', io);
+      
+      console.log(`✅ [Automation] DB saved — ${currentRecord.email} - ${currentRecord.name} (Completed cart navigation)`);
     }
-    console.log(`✅ [Automation] DB saved — ${primaryRecord.email} (Completed address flow and cart navigation)`);
 
   } catch (error) {
     console.error(`❌ [Automation] Error: ${primaryRecord.email} — ${error.message}`);
@@ -513,10 +499,14 @@ export const runFlipkartAutomation = async (jobId, userId, runHeadless = true, i
       reason: `Processing ${emails.length} email(s) with ${CONCURRENCY} parallel workers...`
     });
 
-    // Process each record individually instead of grouping by email
-    const individualRecords = emails.map(r => [r]);
+    const recordsByEmail = {};
+    for (const record of emails) {
+      if (!recordsByEmail[record.email]) recordsByEmail[record.email] = [];
+      recordsByEmail[record.email].push(record);
+    }
+    const emailGroups = Object.values(recordsByEmail);
 
-    for (let i = 0; i < individualRecords.length; i += CONCURRENCY) {
+    for (let i = 0; i < emailGroups.length; i += CONCURRENCY) {
       const currentJob = await AutomationJob.findById(jobId);
       if (!currentJob || currentJob.status === 'stopped') {
         console.log(`🛑 [Automation] Stop signal detected. Halting.`);
@@ -524,7 +514,7 @@ export const runFlipkartAutomation = async (jobId, userId, runHeadless = true, i
         break;
       }
 
-      const batch = individualRecords.slice(i, i + CONCURRENCY);
+      const batch = emailGroups.slice(i, i + CONCURRENCY);
       console.log(`[Automation] Processing batch ${Math.floor(i / CONCURRENCY) + 1}...`);
 
       const promises = batch.map(group => {
