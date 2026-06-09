@@ -173,6 +173,63 @@ router.get('/stats', requireAuth, async (req, res) => {
   }
 });
 
+// @route   GET api/purchases/last-job-summary
+// @desc    Get the most recent job with its counts and last processed record
+router.get('/last-job-summary', requireAuth, async (req, res) => {
+  try {
+    const lastJob = await AutomationJob.findOne(
+      { userId: req.user._id, isDeleted: false, type: 'purchase' }
+    ).sort({ createdAt: -1 });
+
+    if (!lastJob) {
+      return res.status(200).json({ success: true, data: null });
+    }
+
+    // Get counts
+    const counts = await Purchase.aggregate([
+      { $match: { jobId: lastJob._id } },
+      { $group: {
+        _id: null,
+        total: { $sum: 1 },
+        success: { $sum: { $cond: [{ $eq: ["$status", "success"] }, 1, 0] } },
+        failed: { $sum: { $cond: [{ $eq: ["$status", "failed"] }, 1, 0] } },
+        pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } }
+      }}
+    ]);
+    const stats = counts.length > 0 ? counts[0] : { total: 0, success: 0, failed: 0, pending: 0 };
+
+    // Get last processed record (most recently updated non-pending)
+    const lastRecord = await Purchase.findOne(
+      { jobId: lastJob._id, status: { $in: ['success', 'failed', 'inprogress'] } }
+    ).sort({ updatedAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        jobId: lastJob._id,
+        jobName: lastJob.uploadedFile,
+        jobStatus: lastJob.status,
+        jobReason: lastJob.reason,
+        jobCreatedAt: lastJob.createdAt,
+        totalRecords: stats.total,
+        successCount: stats.success,
+        failedCount: stats.failed,
+        pendingCount: stats.pending,
+        lastRecord: lastRecord ? {
+          email: lastRecord.email,
+          name: lastRecord.name,
+          status: lastRecord.status,
+          reason: lastRecord.reason,
+          orderId: lastRecord.orderId,
+          updatedAt: lastRecord.updatedAt
+        } : null
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error fetching last job summary' });
+  }
+});
+
 // @route   GET api/purchases/files
 // @desc    Get server-side paginated automation jobs
 router.get('/files', requireAuth, async (req, res) => {
@@ -355,9 +412,60 @@ router.get('/trash', requireAuth, async (req, res) => {
 router.get('/export', requireAuth, async (req, res) => {
   try {
     const { type, jobId, search, startDate, endDate } = req.query;
-    
-    let dataToExport = [];
+    const ExcelJS = (await import('exceljs')).default;
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = req.user.name || req.user.email || 'System';
+    workbook.created = new Date();
+
     let fileName = 'export.xlsx';
+
+    // ── Helper: style header row ──
+    const styleHeader = (sheet) => {
+      const headerRow = sheet.getRow(1);
+      headerRow.eachCell(cell => {
+        cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4472C4' } };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.border = {
+          top: { style: 'thin' }, bottom: { style: 'thin' },
+          left: { style: 'thin' }, right: { style: 'thin' }
+        };
+      });
+      headerRow.height = 22;
+    };
+
+    // ── Helper: alternating row colors ──
+    const applyAlternatingRows = (sheet) => {
+      const lightGray = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber === 1) return; // skip header
+        row.eachCell(cell => {
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFE0E0E0' } },
+            bottom: { style: 'thin', color: { argb: 'FFE0E0E0' } },
+            left: { style: 'thin', color: { argb: 'FFE0E0E0' } },
+            right: { style: 'thin', color: { argb: 'FFE0E0E0' } }
+          };
+          cell.alignment = { vertical: 'middle', wrapText: true };
+          if (rowNumber % 2 === 0) {
+            cell.fill = lightGray;
+          }
+        });
+      });
+    };
+
+    // ── Helper: auto-fit column widths ──
+    const autoFitColumns = (sheet) => {
+      sheet.columns.forEach(col => {
+        let maxLen = col.header ? col.header.length : 10;
+        col.eachCell({ includeEmpty: false }, cell => {
+          const len = cell.value ? cell.value.toString().length : 0;
+          if (len > maxLen) maxLen = len;
+        });
+        col.width = Math.min(maxLen + 4, 50);
+      });
+    };
 
     if (type === 'files' || type === 'trash') {
       const isDeleted = type === 'trash';
@@ -382,20 +490,45 @@ router.get('/export', requireAuth, async (req, res) => {
             uploadedFile: 1, status: 1, reason: 1, createdAt: 1, deletedAt: 1,
             totalRecords: { $size: "$records" },
             successCount: { $size: { $filter: { input: "$records", as: "e", cond: { $eq: ["$$e.status", "success"] } } } },
-            failedCount: { $size: { $filter: { input: "$records", as: "e", cond: { $eq: ["$$e.status", "failed"] } } } }
+            failedCount: { $size: { $filter: { input: "$records", as: "e", cond: { $eq: ["$$e.status", "failed"] } } } },
+            pendingCount: { $size: { $filter: { input: "$records", as: "e", cond: { $eq: ["$$e.status", "pending"] } } } }
         }}
       ]);
 
-      dataToExport = jobsList.map(j => ({
-        'Job Name': j.uploadedFile,
-        'Status': j.status,
-        'Reason': j.reason,
-        'Total Records': j.totalRecords,
-        'Success': j.successCount,
-        'Failed': j.failedCount,
-        'Created At': new Date(j.createdAt).toLocaleString(),
-        ...(isDeleted ? { 'Deleted At': new Date(j.deletedAt).toLocaleString() } : {})
-      }));
+      const sheet = workbook.addWorksheet('Jobs');
+      const columns = [
+        { header: 'S.No', key: 'sno', width: 6 },
+        { header: 'Job Name', key: 'jobName', width: 25 },
+        { header: 'Status', key: 'status', width: 12 },
+        { header: 'Reason', key: 'reason', width: 30 },
+        { header: 'Total Records', key: 'total', width: 14 },
+        { header: 'Success', key: 'success', width: 10 },
+        { header: 'Failed', key: 'failed', width: 10 },
+        { header: 'Pending', key: 'pending', width: 10 },
+        { header: 'Created At', key: 'createdAt', width: 22 },
+      ];
+      if (isDeleted) columns.push({ header: 'Deleted At', key: 'deletedAt', width: 22 });
+      sheet.columns = columns;
+
+      jobsList.forEach((j, i) => {
+        const row = {
+          sno: i + 1,
+          jobName: j.uploadedFile,
+          status: j.status,
+          reason: j.reason || '',
+          total: j.totalRecords,
+          success: j.successCount,
+          failed: j.failedCount,
+          pending: j.pendingCount,
+          createdAt: new Date(j.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+        };
+        if (isDeleted) row.deletedAt = j.deletedAt ? new Date(j.deletedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '';
+        sheet.addRow(row);
+      });
+
+      styleHeader(sheet);
+      applyAlternatingRows(sheet);
+      autoFitColumns(sheet);
       fileName = isDeleted ? 'Trash_Export.xlsx' : 'Automation_Jobs_Export.xlsx';
 
     } else if (type === 'details') {
@@ -415,33 +548,86 @@ router.get('/export', requireAuth, async (req, res) => {
         ];
       }
       const records = await Purchase.find(matchQuery).sort({ createdAt: 1 });
-      
-      dataToExport = records.map(e => ({
-        'Email Address': e.email,
-        'Product Link': e.productlink,
-        'Seller Name': e.sellername,
-        'Phone': e.phone,
-        'Pincode': e.pincode,
-        'Address Line 1': e.addressline1,
-        'Address Line 2': e.addressline2,
-        'Landmark': e.landmark,
-        'Alternate Phone': e.alternatephone,
-        'Status': e.status,
-        'Reason': e.reason || '',
-        'Created At': new Date(e.createdAt).toLocaleString()
-      }));
+
+      // ── Info Sheet (metadata) ──
+      const infoSheet = workbook.addWorksheet('Export Info');
+      infoSheet.columns = [
+        { header: 'Field', key: 'field', width: 22 },
+        { header: 'Value', key: 'value', width: 45 }
+      ];
+      const infoRows = [
+        { field: 'Exported By', value: req.user.name || req.user.email || 'Unknown' },
+        { field: 'Export Date', value: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) },
+        { field: 'Job Name', value: job.uploadedFile },
+        { field: 'Job Status', value: job.status },
+        { field: 'Job Reason', value: job.reason || '' },
+        { field: 'Total Records', value: records.length },
+        { field: 'Success', value: records.filter(r => r.status === 'success').length },
+        { field: 'Failed', value: records.filter(r => r.status === 'failed').length },
+        { field: 'Pending', value: records.filter(r => r.status === 'pending').length },
+        { field: 'Job Created At', value: new Date(job.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) },
+      ];
+      infoRows.forEach(r => infoSheet.addRow(r));
+      styleHeader(infoSheet);
+      applyAlternatingRows(infoSheet);
+
+      // ── Data Sheet (all fields) ──
+      const sheet = workbook.addWorksheet('Records');
+      sheet.columns = [
+        { header: 'S.No', key: 'sno', width: 6 },
+        { header: 'Email', key: 'email', width: 28 },
+        { header: 'Name', key: 'name', width: 18 },
+        { header: 'Product Link', key: 'productlink', width: 40 },
+        { header: 'Seller Name', key: 'sellername', width: 18 },
+        { header: 'Phone', key: 'phone', width: 14 },
+        { header: 'Pincode', key: 'pincode', width: 10 },
+        { header: 'Address Line 1', key: 'addressline1', width: 30 },
+        { header: 'Address Line 2', key: 'addressline2', width: 22 },
+        { header: 'Landmark', key: 'landmark', width: 18 },
+        { header: 'Alternate Phone', key: 'alternatephone', width: 16 },
+        { header: 'Status', key: 'status', width: 12 },
+        { header: 'Order ID', key: 'orderId', width: 22 },
+        { header: 'Reason', key: 'reason', width: 35 },
+        { header: 'Address Saved', key: 'addressSaved', width: 14 },
+        { header: 'Created At', key: 'createdAt', width: 22 },
+        { header: 'Completed At', key: 'completedAt', width: 22 },
+      ];
+
+      records.forEach((e, i) => {
+        sheet.addRow({
+          sno: i + 1,
+          email: e.email,
+          name: e.name || '',
+          productlink: e.productlink || '',
+          sellername: e.sellername || '',
+          phone: e.phone || '',
+          pincode: e.pincode || '',
+          addressline1: e.addressline1 || '',
+          addressline2: e.addressline2 || '',
+          landmark: e.landmark || '',
+          alternatephone: e.alternatephone || '',
+          status: e.status,
+          orderId: e.orderId || '',
+          reason: e.reason || '',
+          addressSaved: e.addressSaved ? 'Yes' : 'No',
+          createdAt: new Date(e.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+          completedAt: e.completedAt ? new Date(e.completedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '',
+        });
+      });
+
+      styleHeader(sheet);
+      applyAlternatingRows(sheet);
+      autoFitColumns(sheet);
       fileName = `JobDetails_${job.uploadedFile}.xlsx`;
     }
 
-    const worksheet = xlsx.utils.json_to_sheet(dataToExport);
-    const workbook = xlsx.utils.book_new();
-    xlsx.utils.book_append_sheet(workbook, worksheet, 'Data');
-    const buffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = await workbook.xlsx.writeBuffer();
 
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    return res.status(200).send(buffer);
+    return res.status(200).send(Buffer.from(buffer));
   } catch (err) {
+    console.error('[Export Error]', err);
     return res.status(500).json({ success: false, message: 'Error exporting data' });
   }
 });
@@ -519,8 +705,11 @@ router.post('/retry-automation', requireAuth, async (req, res) => {
     const query = { jobId: job._id, status: 'failed' };
     if (reasonFilter && reasonFilter !== 'all') query.reason = reasonFilter;
 
-    const count = await Purchase.countDocuments(query);
+    const failedRecords = await Purchase.find(query).select('_id');
+    const count = failedRecords.length;
     if (count === 0) return res.status(400).json({ success: false, message: 'No failed records found.' });
+
+    const failedRecordIds = failedRecords.map(r => r._id.toString());
 
     await Purchase.updateMany(query, { status: 'pending', reason: 'Queued for retry...', screenshot: '' });
 
@@ -531,7 +720,7 @@ router.post('/retry-automation', requireAuth, async (req, res) => {
     if (req.app.locals.io) req.app.locals.io.emit('job-update', { type: 'status-change', jobId });
 
     const { runFlipkartAutomation } = await import('../playwright/automation.js');
-    runFlipkartAutomation(job._id.toString(), req.user._id, headless !== false, req.app.locals.io);
+    runFlipkartAutomation(job._id.toString(), req.user._id, headless !== false, req.app.locals.io, failedRecordIds);
 
     return res.status(200).json({ success: true, message: `Retrying automation for ${count} record(s).` });
   } catch (err) {

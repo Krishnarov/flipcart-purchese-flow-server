@@ -39,6 +39,10 @@ const purchaseSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  orderId: {
+    type: String,
+    default: ''
+  },
   completedAt: {
     type: Date
   }
