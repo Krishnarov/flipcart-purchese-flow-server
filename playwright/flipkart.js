@@ -11,7 +11,7 @@ export const loginToFlipkart = async (page, username) => {
     console.log(`[Flipkart] Navigating to login page for: ${username}`);
     await page.goto('https://www.flipkart.com/account/login', {
       waitUntil: 'domcontentloaded',
-      timeout: 30000
+      timeout: 10000
     });
 
     // Wait for the email input to appear (faster than waiting for network)
@@ -66,7 +66,7 @@ export const loginToFlipkartWithOTP = async (page, otp) => {
     // Some Flipkart versions auto-submit, others need a button click
     const verifyBtn = page.getByRole('button', { name: /verify/i });
     if (await verifyBtn.count() > 0) {
-      await verifyBtn.click().catch(() => {});
+      await verifyBtn.click().catch(() => { });
     }
 
   } catch (error) {

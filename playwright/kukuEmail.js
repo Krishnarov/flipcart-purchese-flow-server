@@ -12,7 +12,7 @@ export const loginToEmail = async (page, email) => {
     console.log(`[Email] Navigating to kuku.lu mailbox for: ${email}`);
     await page.goto("https://m.kuku.lu/recv.php", {
       waitUntil: "domcontentloaded",
-      timeout: 30000
+      timeout: 10000
     });
 
     console.log('[Email] Searching for mail address...');

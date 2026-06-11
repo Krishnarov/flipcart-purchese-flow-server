@@ -536,7 +536,7 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
             await flipkartPage
               .locator('input[name="alternatePhone"]')
               .fill(r.alternatephone);
-
+          await delay(500)
           // Save address
           const saveBtn = flipkartPage
             .locator('button:has-text("Save")')
@@ -1164,15 +1164,15 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
             `[Automation Tracking] Confirm order clicked. Waiting for success page...`,
           );
 
-          // Wait for reference_id in URL (Playwright waitForURL callback receives URL string)
+          // Wait for success URL (reduce timeout to avoid hanging if no reference_id)
           let orderId = "";
           try {
             await flipkartPage.waitForURL(
               (url) => {
                 const urlStr = typeof url === 'string' ? url : url.toString();
-                return urlStr.includes('reference_id');
+                return urlStr.includes('reference_id') || urlStr.includes('/order') || urlStr.includes('/checkout');
               },
-              { timeout: 20000 }
+              { timeout: 8000 }
             );
           } catch (_) { }
 
@@ -1181,13 +1181,13 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
             const currentPageUrl = flipkartPage.url();
             console.log(`[Automation Tracking] Current URL after order: ${currentPageUrl}`);
             const urlObj = new URL(currentPageUrl);
-            const referenceId = urlObj.searchParams.get('reference_id');
+            const referenceId = urlObj.searchParams.get('reference_id') || urlObj.searchParams.get('order_id');
             if (referenceId) {
               orderId = `${referenceId}00`;
               console.log(`[Automation Tracking] Order ID extracted: ${orderId}`);
             } else {
               // Try regex fallback on raw URL string
-              const match = currentPageUrl.match(/reference_id=([^&]+)/);
+              const match = currentPageUrl.match(/(?:reference_id|order_id)=([^&]+)/);
               if (match && match[1]) {
                 orderId = `${match[1]}00`;
                 console.log(`[Automation Tracking] Order ID from regex: ${orderId}`);
@@ -1197,11 +1197,11 @@ const processPurchase = async (records, jobId, runHeadless, io) => {
             console.warn(`[Automation Tracking] Could not parse order URL: ${urlErr.message}`);
           }
 
-          // Wait for success text
+          // Wait for success text including "Thanks for shopping" from screenshot
           await flipkartPage
-            .locator('text=/Order Placed|Thank you|Order Confirmed|Successfully/i')
+            .locator('text=/Order Placed|Thank you|Order Confirmed|Successfully|Thanks for shopping/i')
             .first()
-            .waitFor({ state: 'visible', timeout: 10000 })
+            .waitFor({ state: 'visible', timeout: 5000 })
             .catch(() => { console.warn('[Automation Tracking] Success text not found.'); });
 
           // Now take screenshot of success page
