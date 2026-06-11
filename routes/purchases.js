@@ -135,8 +135,8 @@ router.post('/upload', requireAuth, upload.single('file'), async (req, res) => {
 // @desc    Get unpaginated global stats
 router.get('/stats', requireAuth, async (req, res) => {
   try {
-    const jobsCount = await AutomationJob.countDocuments({ userId: req.user._id, isDeleted: false, type: 'purchase' });
-    const activeJobs = await AutomationJob.find({ userId: req.user._id, isDeleted: false, type: 'purchase' }, '_id status');
+    const jobsCount = await AutomationJob.countDocuments({ isDeleted: false, type: 'purchase' });
+    const activeJobs = await AutomationJob.find({ isDeleted: false, type: 'purchase' }, '_id status');
     
     let runningCount = 0;
     const jobIds = activeJobs.map(j => {
@@ -178,7 +178,7 @@ router.get('/stats', requireAuth, async (req, res) => {
 router.get('/last-job-summary', requireAuth, async (req, res) => {
   try {
     const lastJob = await AutomationJob.findOne(
-      { userId: req.user._id, isDeleted: false, type: 'purchase' }
+      { isDeleted: false, type: 'purchase' }
     ).sort({ createdAt: -1 });
 
     if (!lastJob) {
@@ -240,7 +240,7 @@ router.get('/files', requireAuth, async (req, res) => {
     const sortField = req.query.sortField || 'createdAt';
     const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
 
-    const matchQuery = buildMatchQuery(req, { userId: req.user._id, isDeleted: false, type: 'purchase' });
+    const matchQuery = buildMatchQuery(req, { isDeleted: false, type: 'purchase' });
     delete matchQuery.$or;
     if (req.query.search) {
       matchQuery.$or = [
@@ -302,7 +302,7 @@ router.get('/file-details', requireAuth, async (req, res) => {
     const { jobId } = req.query;
     if (!jobId) return res.status(400).json({ success: false, message: 'Job ID parameter is required' });
 
-    const job = await AutomationJob.findOne({ _id: jobId, userId: req.user._id, isDeleted: false });
+    const job = await AutomationJob.findOne({ _id: jobId, isDeleted: false });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
     const page = parseInt(req.query.page) || 1;
@@ -372,7 +372,7 @@ router.get('/trash', requireAuth, async (req, res) => {
     const sortField = req.query.sortField || 'deletedAt';
     const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
 
-    const matchQuery = buildMatchQuery(req, { userId: req.user._id, isDeleted: true, type: 'purchase' });
+    const matchQuery = buildMatchQuery(req, { isDeleted: true, type: 'purchase' });
     delete matchQuery.$or;
     if (req.query.search) {
       matchQuery.$or = [
@@ -469,7 +469,7 @@ router.get('/export', requireAuth, async (req, res) => {
 
     if (type === 'files' || type === 'trash') {
       const isDeleted = type === 'trash';
-      const matchQuery = { userId: req.user._id, isDeleted, type: 'purchase' };
+      const matchQuery = { isDeleted, type: 'purchase' };
       if (search) {
         matchQuery.$or = [
           { uploadedFile: { $regex: search, $options: 'i' } },
@@ -533,7 +533,7 @@ router.get('/export', requireAuth, async (req, res) => {
 
     } else if (type === 'details') {
       if (!jobId) return res.status(400).json({ success: false, message: 'Job ID missing' });
-      const job = await AutomationJob.findOne({ _id: jobId, userId: req.user._id });
+      const job = await AutomationJob.findOne({ _id: jobId });
       if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
       const matchQuery = { jobId: job._id };
@@ -638,7 +638,7 @@ router.post('/start-automation', requireAuth, async (req, res) => {
     const { jobId, headless } = req.body;
     if (!jobId) return res.status(400).json({ success: false, message: 'Job ID parameter is required' });
 
-    const job = await AutomationJob.findOne({ _id: jobId, userId: req.user._id });
+    const job = await AutomationJob.findOne({ _id: jobId });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
     if (['pending', 'running'].includes(job.status)) {
@@ -677,7 +677,7 @@ router.post('/stop-automation', requireAuth, async (req, res) => {
     if (!jobId) return res.status(400).json({ success: false, message: 'Job ID parameter is required' });
 
     const result = await AutomationJob.updateOne(
-      { _id: jobId, userId: req.user._id },
+      { _id: jobId },
       { status: 'stopped', reason: 'Stopped by user request.' }
     );
 
@@ -695,7 +695,7 @@ router.post('/retry-automation', requireAuth, async (req, res) => {
     const { jobId, reasonFilter, headless } = req.body;
     if (!jobId) return res.status(400).json({ success: false, message: 'Job ID parameter is required' });
 
-    const job = await AutomationJob.findOne({ _id: jobId, userId: req.user._id });
+    const job = await AutomationJob.findOne({ _id: jobId });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
     if (['pending', 'running'].includes(job.status)) {
@@ -737,8 +737,8 @@ router.post('/retry-single', requireAuth, async (req, res) => {
     const record = await Purchase.findById(recordId);
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
 
-    const job = await AutomationJob.findOne({ _id: record.jobId, userId: req.user._id });
-    if (!job) return res.status(403).json({ success: false, message: 'Unauthorized job access' });
+    const job = await AutomationJob.findOne({ _id: record.jobId });
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
     record.status = 'pending';
     record.reason = 'Queued for retry...';
@@ -763,7 +763,7 @@ router.post('/retry-single', requireAuth, async (req, res) => {
 // @route   PATCH api/purchases/soft-delete/:jobId
 router.patch('/soft-delete/:jobId', requireAuth, async (req, res) => {
   try {
-    const job = await AutomationJob.findOne({ _id: req.params.jobId, userId: req.user._id });
+    const job = await AutomationJob.findOne({ _id: req.params.jobId });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
     if (['pending', 'running'].includes(job.status)) {
@@ -785,7 +785,7 @@ router.patch('/soft-delete/:jobId', requireAuth, async (req, res) => {
 // @route   DELETE api/purchases/permanent-delete/:jobId
 router.delete('/permanent-delete/:jobId', requireAuth, async (req, res) => {
   try {
-    const job = await AutomationJob.findOne({ _id: req.params.jobId, userId: req.user._id });
+    const job = await AutomationJob.findOne({ _id: req.params.jobId });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
     if (!job.isDeleted) {
@@ -807,7 +807,7 @@ router.delete('/permanent-delete/:jobId', requireAuth, async (req, res) => {
 router.patch('/restore/:jobId', requireAuth, async (req, res) => {
   try {
     const result = await AutomationJob.updateOne(
-      { _id: req.params.jobId, userId: req.user._id, isDeleted: true },
+      { _id: req.params.jobId, isDeleted: true },
       { $set: { isDeleted: false }, $unset: { deletedAt: '' } }
     );
     if (result.matchedCount === 0) return res.status(404).json({ success: false, message: 'Trashed job not found' });
