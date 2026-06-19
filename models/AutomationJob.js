@@ -12,7 +12,7 @@ const automationJobSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['login', 'purchase'],
+    enum: ['login', 'purchase', 'cancel'],
     default: 'purchase'
   },
   status: {

@@ -6,6 +6,7 @@ import http from 'http';
 import { Server } from 'socket.io';
 import authRoutes from './routes/auth.js';
 import purchaseRoutes from './routes/purchases.js';
+import cancelRoutes from './routes/cancel.js';
 
 dotenv.config();
 
@@ -39,6 +40,7 @@ app.use('/screenshots', express.static('screenshots'));
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/purchases', purchaseRoutes);
+app.use('/api/cancel', cancelRoutes);
 
 // Health Check
 app.get('/health', (req, res) => {

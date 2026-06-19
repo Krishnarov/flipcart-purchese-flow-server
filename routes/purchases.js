@@ -638,11 +638,12 @@ router.post('/start-automation', requireAuth, async (req, res) => {
     const { jobId, headless } = req.body;
     if (!jobId) return res.status(400).json({ success: false, message: 'Job ID parameter is required' });
 
+    // Always fetch fresh from DB so any system sees current status
     const job = await AutomationJob.findOne({ _id: jobId });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
     if (['pending', 'running'].includes(job.status)) {
-      return res.status(400).json({ success: false, message: 'Automation is already running or queued.' });
+      return res.status(400).json({ success: false, message: 'Automation is already running or queued. Stop it first from any system.' });
     }
 
     const pendingCount = await Purchase.countDocuments({ jobId: job._id, status: 'pending' });
@@ -650,9 +651,15 @@ router.post('/start-automation', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, message: 'No pending records to process. Use Retry.' });
     }
 
-    job.status = 'pending';
-    job.reason = 'Queued for Flipkart automation...';
-    await job.save();
+    // Atomically set to pending — prevents race condition from multiple systems
+    const updated = await AutomationJob.findOneAndUpdate(
+      { _id: jobId, status: { $nin: ['pending', 'running'] } },
+      { status: 'pending', reason: 'Queued for Flipkart automation...' },
+      { new: true }
+    );
+    if (!updated) {
+      return res.status(400).json({ success: false, message: 'Job was already started by another system.' });
+    }
 
     await Purchase.updateMany(
       { jobId: job._id, status: 'pending' },
@@ -676,14 +683,20 @@ router.post('/stop-automation', requireAuth, async (req, res) => {
     const { jobId } = req.body;
     if (!jobId) return res.status(400).json({ success: false, message: 'Job ID parameter is required' });
 
-    const result = await AutomationJob.updateOne(
-      { _id: jobId },
-      { status: 'stopped', reason: 'Stopped by user request.' }
+    // Any system can stop — just update DB, automation loop will detect it
+    const result = await AutomationJob.findOneAndUpdate(
+      { _id: jobId, status: { $in: ['pending', 'running'] } },
+      { status: 'stopped', reason: 'Stopped by user request.' },
+      { new: true }
     );
+
+    if (!result) {
+      return res.status(400).json({ success: false, message: 'Job is not running or already stopped.' });
+    }
 
     if (req.app.locals.io) req.app.locals.io.emit('job-update', { type: 'status-change', jobId });
 
-    return res.status(200).json({ success: true, message: `Stopped automation job successfully.` });
+    return res.status(200).json({ success: true, message: 'Stop signal sent. Automation will halt after current record.' });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Error stopping automation' });
   }
@@ -692,7 +705,7 @@ router.post('/stop-automation', requireAuth, async (req, res) => {
 // @route   POST api/purchases/retry-automation
 router.post('/retry-automation', requireAuth, async (req, res) => {
   try {
-    const { jobId, reasonFilter, headless } = req.body;
+    const { jobId, reasonFilter, reasonFilters, headless } = req.body;
     if (!jobId) return res.status(400).json({ success: false, message: 'Job ID parameter is required' });
 
     const job = await AutomationJob.findOne({ _id: jobId });
@@ -703,14 +716,15 @@ router.post('/retry-automation', requireAuth, async (req, res) => {
     }
 
     const query = { jobId: job._id, status: 'failed' };
-    if (reasonFilter && reasonFilter !== 'all') query.reason = reasonFilter;
+    // Support both old single filter and new multi-select array
+    const filters = reasonFilters && reasonFilters.length > 0 ? reasonFilters : (reasonFilter && reasonFilter !== 'all' ? [reasonFilter] : null);
+    if (filters) query.reason = { $in: filters };
 
     const failedRecords = await Purchase.find(query).select('_id');
     const count = failedRecords.length;
     if (count === 0) return res.status(400).json({ success: false, message: 'No failed records found.' });
 
     const failedRecordIds = failedRecords.map(r => r._id.toString());
-
     await Purchase.updateMany(query, { status: 'pending', reason: 'Queued for retry...', screenshot: '' });
 
     job.status = 'pending';
@@ -725,6 +739,25 @@ router.post('/retry-automation', requireAuth, async (req, res) => {
     return res.status(200).json({ success: true, message: `Retrying automation for ${count} record(s).` });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Error retrying automation' });
+  }
+});
+
+// @route   GET api/purchases/failed-reasons
+router.get('/failed-reasons', requireAuth, async (req, res) => {
+  try {
+    const { jobId } = req.query;
+    if (!jobId) return res.status(400).json({ success: false, message: 'Job ID is required' });
+
+    const reasons = await Purchase.distinct('reason', { jobId, status: 'failed', reason: { $nin: [null, ''] } });
+    const reasonsWithCount = await Promise.all(
+      reasons.map(async (reason) => ({
+        reason,
+        count: await Purchase.countDocuments({ jobId, status: 'failed', reason })
+      }))
+    );
+    return res.status(200).json({ success: true, data: reasonsWithCount });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Error fetching failed reasons' });
   }
 });
 
