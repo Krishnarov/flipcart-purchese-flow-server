@@ -84,9 +84,9 @@ const failRecord = async (taskId, taskMeta, page, reason, io) => {
       screenshotPath = `screenshots/cancel-failed-${taskMeta.email}-${Date.now()}.png`;
       await page
         .screenshot({ path: screenshotPath, fullPage: false })
-        .catch(() => {});
+        .catch(() => { });
     }
-  } catch (_) {}
+  } catch (_) { }
 
   const fields = {
     status: "failed",
@@ -254,7 +254,7 @@ const processCancelTask = async (task, jobId, runHeadless, io) => {
     if (isSomethingWrong) {
       ensureScreenshotsDir();
       const ssPath = `screenshots/cancel-already-${task.email}-${task.orderId}-${Date.now()}.png`;
-      await page.screenshot({ path: ssPath, fullPage: false }).catch(() => {});
+      await page.screenshot({ path: ssPath, fullPage: false }).catch(() => { });
       const reason = `Already cancelled or not eligible. Order ID: ${task.orderId}`;
       await updateTask(task._id, {
         status: "failed",
@@ -339,7 +339,7 @@ const processCancelTask = async (task, jobId, runHeadless, io) => {
         () => !document.querySelector("button.dSM5Ub")?.disabled,
         { timeout: 5000 },
       )
-      .catch(() => {});
+      .catch(() => { });
     await continueBtn.click({ force: true });
     console.log(`[Cancel] CONTINUE clicked.`);
 
@@ -349,6 +349,15 @@ const processCancelTask = async (task, jobId, runHeadless, io) => {
       { ...taskMeta, status: "inprogress" },
       "Selecting cancellation option...",
     );
+    await page.waitForTimeout(500);
+    const acceptAndContinue = page.getByRole("button", { name: /Accept & Continue/i })
+    if (await acceptAndContinue.count() > 0) {
+      await acceptAndContinue.click();
+      await page.waitForLoadState('domcontentloaded');
+      await page.waitForLoadState('load');
+      await page.waitForTimeout(500);
+    }
+
     const codRadio = page.locator('label[for="COD"]');
     await codRadio.waitFor({ state: "visible", timeout: 6000 });
     await codRadio.click();
@@ -391,7 +400,7 @@ const processCancelTask = async (task, jobId, runHeadless, io) => {
   } finally {
     try {
       if (browser) await browser.close();
-    } catch (_) {}
+    } catch (_) { }
   }
 };
 
